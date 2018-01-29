@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Convert Thunderbird address ldif to your ldap ldif.
+"""Convert Thunderbird address ldif to your LDAP ldif, or the reverse.
 """
 import argparse
 import base64
@@ -8,7 +8,7 @@ import re
 
 
 def parse_entry(lines):
-    """make entry object
+    """Read lines and make entry object
 
     Arguments:
         lines  -- entry lines
@@ -19,23 +19,28 @@ def parse_entry(lines):
     entry = {}
     for line in lines:
         line = line.replace('\n', '').replace('\r', '')
-        if ': ' in line:
+        if ':: ' in line:
+            (key, value) = line.split(':: ')
+            value = base64.b64decode(value).decode('utf-8')
+        elif ': ' in line:
             (key, value) = line.split(': ')
-            if key not in entry:
-                entry[key] = []
-            entry[key].append(value)
+        else:
+            continue
+        if key not in entry:
+            entry[key] = []
+        entry[key].append(value)
     return entry
 
 
-def dump_entry(entry, base_path):
-    """dump entry
+def adjust_entry_ldap(entry, base_path):
+    """Adjust entry for LDAP
 
     Arguments:
         entry     -- entry object
         base_path -- ldap base path
 
     Returns:
-        nothing
+        Nothing.
     """
     if 'mail' not in entry:
         return
@@ -58,6 +63,51 @@ def dump_entry(entry, base_path):
     if 'dn' in entry:
         entry['dn'] = [f'mail={mail},{base_path}']
 
+
+def adjust_entry_thunderbird(entry):
+    """Adjust entry for Thunderbird
+
+    Arguments:
+        entry     -- entry object
+
+    Returns:
+        Nothing.
+    """
+    if 'mail' not in entry:
+        return
+    mail = entry['mail'][0]
+
+    # append
+    if 'modifytimestamp' not in entry:
+        entry['modifytimestamp'] = ['0']
+
+    # remove
+    if 'cn' in entry:
+        if entry['cn'] == mail:
+            del entry['cn']
+
+    if 'sn' in entry:
+        if entry['sn'] == mail:
+            del entry['sn']
+
+    # replace attribute
+    if 'dn' in entry:
+        if 'cn' in entry:
+            cn = entry['cn'][0]
+            entry['dn'] = [f"cn={cn},mail={mail}"]
+        else:
+            entry['dn'] = [f'mail={mail}']
+
+
+def dump_entry_for_ldap(entry):
+    """Dump entry for LDAP ldif
+
+    Arguments:
+        entry     -- entry object
+
+    Returns:
+        Nothing.
+    """
     # formatting
     lines = []
     for (key, values) in entry.items():
@@ -71,59 +121,94 @@ def dump_entry(entry, base_path):
         print(line)
 
 
-def b64decode(line):
-    """decode line
+def dump_entry_for_thunderbird(entry):
+    """Dump entry for Thunderbird ldif
 
     Arguments:
-        line -- Thunerbird address ldif line
+        entry     -- entry object
 
     Returns:
-        decoded line
+        Nothing.
     """
-    if ':: ' not in line:
-        return line
-    (key, value) = line.split(':: ')
-    _value = base64.b64decode(value).decode('utf-8')
-    return f'{key}: {_value}'
+    # formatting
+    reg = re.compile('^[-\w\d\s\.@?]+$', flags=re.ASCII)
+    lines = []
+    for (key, values) in entry.items():
+        for value in values:
+            need_escape = False
+            if key != 'dn':
+                if not reg.match(value):
+                    need_escape = True
+            else:
+                if 'cn' in entry:
+                    cn = entry['cn'][0]
+                    if not reg.match(cn):
+                        need_escape = True
+            if need_escape:
+                b = value.encode('utf-8')
+                value_ = base64.b64encode(b).decode('utf-8')
+                line = f'{key}:: {value_}'
+            else:
+                line = f'{key}: {value}'
+            lines.append(line)
+    lines.append('')
+
+    # output
+    for line in lines:
+        print(line)
 
 
-def dump(fobj, base_path):
-    """split each entry and dump it
+def convert(fobj, base_path=''):
+    """Convert ldif
 
     Arguments:
-        fobj      -- Thunderbird address ldif file object
-        base_path -- ldap base path
+        fobj      -- Thunderbird ldif file object
+        base_path -- ldap base path(when convert to LDAP ldif)
 
     Returns:
-        nothing.
+        Nothing.
     """
     lines = []
     for line in fobj:
         line = line.replace('\n', '').replace('\r', '')
-        line = b64decode(line)
         if line:
             lines.append(line)
             continue
+        # convert and dump
         someone = parse_entry(lines)
-        dump_entry(someone, base_path)
+        if base_path:
+            # Thunderbird -> LDAP
+            adjust_entry_ldap(someone, base_path)
+            dump_entry_for_ldap(someone)
+        else:
+            # LDAP -> Thunderbird
+            adjust_entry_thunderbird(someone)
+            dump_entry_for_thunderbird(someone)
         lines = []
 
 
 def main():
+    """Main routine
+
+    Parse arguments and call subrouteine.
+    """
     parser = argparse.ArgumentParser(
-        description='Convert Thunderbird address ldif to your ldap ldif.')
-    parser.add_argument('fname',
-                        metavar='FILE',
-                        type=argparse.FileType(),
-                        help='Thunderbird address ldif')
+        description='Convert Thunderbird address ldif to your LDAP ldif,'
+                    ' or the reverse.')
     parser.add_argument('-b',
                         metavar='BASE_PATH',
                         dest='base_path',
-                        required=True,
+                        default='',
                         help='ldap base path')
+    parser.add_argument('-f',
+                        metavar='FILE',
+                        dest='fname',
+                        type=argparse.FileType(),
+                        required=True,
+                        help='ldif file')
 
     args = parser.parse_args()
-    dump(args.fname, args.base_path)
+    convert(args.fname, args.base_path)
 
 
 if __name__ == '__main__':
